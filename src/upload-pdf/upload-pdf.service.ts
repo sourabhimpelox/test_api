@@ -27,6 +27,12 @@ export class UploadPdfService {
     return this.fileVersionRepository.findOne({ where: { version } });
   }
 
+  async getFileVersionByCrnAndVersion(crn: string, version: string): Promise<FileVersion | null> {
+    return await this.fileVersionRepository.findOne({
+      where: { crn, version },
+    })
+  }
+
   async updateWordPath(id: number, wordPath: string): Promise<void> {
     await this.fileVersionRepository.update(id, { s3WordPath: wordPath })
   }
