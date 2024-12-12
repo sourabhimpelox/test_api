@@ -1,44 +1,4 @@
-
-// import { Injectable } from '@nestjs/common';
-// import { InjectRepository } from '@nestjs/typeorm';
-// import { Repository } from 'typeorm';
-// import { FileVersion } from './upload-pdf.entity';
-
-// @Injectable()
-// export class UploadPdfService {
-//   constructor(
-//     @InjectRepository(FileVersion)
-//     private readonly fileVersionRepository: Repository<FileVersion>,
-//   ) {}
-
-//   async createFileVersion(data: { crn: string; version: string; s3Path: string }) {
-//     const fileVersion = this.fileVersionRepository.create(data);
-//     return this.fileVersionRepository.save(fileVersion);
-//   }
-
-//   async getFileVersions(crn: string) {
-//     return this.fileVersionRepository.find({
-//       where: { crn },
-//       order: { createdAt: 'DESC' },
-//     });
-//   }
-
-//   async getFileVersionByVersion(version: string): Promise<FileVersion | undefined> {
-//     return this.fileVersionRepository.findOne({ where: { version } });
-//   }
-
-//   async getFileVersionByCrnAndVersion(crn: string, version: string): Promise<FileVersion | null> {
-//     return await this.fileVersionRepository.findOne({
-//       where: { crn, version },
-//     })
-//   }
-
-//   async updateWordPath(id: number, wordPath: string): Promise<void> {
-//     await this.fileVersionRepository.update(id, { s3WordPath: wordPath })
-//   }
-// }
-// Service File
-import { Injectable } from '@nestjs/common';
+import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { FileVersion } from './upload-pdf.entity';
@@ -71,95 +31,116 @@ export class UploadPdfService {
   }
 
   async handleFileUpload(file: Express.Multer.File) {
-    const versionId = uuidv4();
-    const fileName = `${file.originalname.split('.')[0]}_${versionId}.pdf`;
-    const s3Params = {
-      Bucket: process.env.AWS_BUCKET,
-      Key: fileName,
-      Body: file.buffer,
-      ContentType: 'application/pdf',
-    };
+    try {
+      const versionId = uuidv4();
+      const fileName = `${file.originalname.split('.')[0]}_${versionId}.pdf`;
+      const s3Params = {
+        Bucket: process.env.AWS_BUCKET,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: 'application/pdf',
+      };
 
-    const uploadResult = await this.s3.upload(s3Params).promise();
+      const uploadResult = await this.s3.upload(s3Params).promise();
 
-    return this.createFileVersion({
-      crn: file.originalname.split('.')[0],
-      version: versionId,
-      s3Path: uploadResult.Location,
-    });
+      return this.createFileVersion({
+        crn: file.originalname.split('.')[0],
+        version: versionId,
+        s3Path: uploadResult.Location,
+      });
+    } catch (error) {
+      throw new InternalServerErrorException(`File upload failed: ${error.message}`);
+    }
   }
 
   async getFileVersions(crn: string) {
-    return this.fileVersionRepository.find({
-      where: { crn },
-      order: { createdAt: 'DESC' },
-    });
+    try {
+      return this.fileVersionRepository.find({
+        where: { crn },
+        order: { createdAt: 'DESC' },
+      });
+
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to fetch file versions: ${error.message}`);
+    }
   }
 
   async streamPdfVersion(version: string, res: ExpressResponse) {
-    const fileVersion = await this.getFileVersionByVersion(version);
+    try {
+      const fileVersion = await this.getFileVersionByVersion(version);
 
-    if (!fileVersion) {
-      res.status(404).send({ message: 'Version not found' });
-      return;
+      if (!fileVersion) {
+        res.status(404).send({ message: 'Version not found' });
+        return;
+      }
+
+      const s3Params = {
+        Bucket: process.env.AWS_BUCKET,
+        Key: `${fileVersion.crn}_${fileVersion.version}.pdf`,
+      };
+
+      const fileStream = this.s3.getObject(s3Params).createReadStream();
+      res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.pdf`);
+      res.setHeader('Content-Type', 'application/pdf');
+      fileStream.pipe(res);
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to stream PDF version: ${error.message}`);
     }
-
-    const s3Params = {
-      Bucket: process.env.AWS_BUCKET,
-      Key: `${fileVersion.crn}_${fileVersion.version}.pdf`,
-    };
-
-    const fileStream = this.s3.getObject(s3Params).createReadStream();
-    res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.pdf`);
-    res.setHeader('Content-Type', 'application/pdf');
-    fileStream.pipe(res);
   }
 
   async handleWordDownload(crn: string, version: string, res: ExpressResponse) {
-    const fileVersion = await this.getFileVersionByCrnAndVersion(crn, version);
+    try {
+      const fileVersion = await this.getFileVersionByCrnAndVersion(crn, version);
 
-    if (!fileVersion) {
-      res.status(404).send({ message: 'Version not found' });
-      return;
-    } else {
-      console.log("pdf file present in s3");
-    }
+      if (!fileVersion) {
+        res.status(404).send({ message: 'Version not found' });
+        return;
+      } else {
+        console.log("pdf file present in s3");
+      }
 
-    if (fileVersion.s3WordPath) {
-      console.log('word file exists in S3 ---------------------------------')
-      const wordS3Params = {
-        Bucket: process.env.AWS_BUCKET,
-        Key: `${fileVersion.crn}_${fileVersion.version}.docx`,
-      };
+      if (fileVersion.s3WordPath) {
+        console.log('word file exists in S3 ---------------------------------')
+        const wordS3Params = {
+          Bucket: process.env.AWS_BUCKET,
+          Key: `${fileVersion.crn}_${fileVersion.version}.docx`,
+        };
 
-      const wordFileStream = this.s3.getObject(wordS3Params).createReadStream();
-      res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.docx`);
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      wordFileStream.pipe(res);
-      return;
-    } else {
-      console.log("converting pdf to word");
-      const pdfBuffer = await this.downloadPdfFromUrl(fileVersion.s3Path);
-      const wordBuffer = await this.convertPdfToWordFromBuffer(pdfBuffer);
-      const wordS3Params = {
-        Bucket: process.env.AWS_BUCKET,
-        Key: `${fileVersion.crn}_${fileVersion.version}.docx`,
-        Body: wordBuffer,
-      };
+        const wordFileStream = this.s3.getObject(wordS3Params).createReadStream();
+        res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.docx`);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        wordFileStream.pipe(res);
+        return;
+      } else {
+        console.log("converting pdf to word");
+        const pdfBuffer = await this.downloadPdfFromUrl(fileVersion.s3Path);
+        const wordBuffer = await this.convertPdfToWordFromBuffer(pdfBuffer);
+        const wordS3Params = {
+          Bucket: process.env.AWS_BUCKET,
+          Key: `${fileVersion.crn}_${fileVersion.version}.docx`,
+          Body: wordBuffer,
+        };
 
-      const uploadResult = await this.s3.upload(wordS3Params).promise();
-      await this.updateWordPath(fileVersion.id, uploadResult.Location);
+        const uploadResult = await this.s3.upload(wordS3Params).promise();
+        await this.updateWordPath(fileVersion.id, uploadResult.Location);
 
-      res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.docx`);
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.send(wordBuffer);
+        res.setHeader('Content-Disposition', `attachment; filename=${fileVersion.crn}-${fileVersion.version}.docx`);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        res.send(wordBuffer);
+      }
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to handle Word download: ${error.message}`);
     }
   }
 
   private async downloadPdfFromUrl(pdfUrl: string): Promise<Buffer> {
-    console.log("pdfurl------------------", pdfUrl);
-    const response = await axios.default.get(pdfUrl, { responseType: 'arraybuffer' });
-    return Buffer.from(response.data);
+    try {
+      console.log("pdfurl------------------", pdfUrl);
+      const response = await axios.default.get(pdfUrl, { responseType: 'arraybuffer' });
+      return Buffer.from(response.data);
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to download PDF: ${error.message}`);
+    }
   }
 
   private async convertPdfToWordFromBuffer(pdfBuffer: Buffer): Promise<Buffer> {
@@ -198,19 +179,35 @@ export class UploadPdfService {
   }
 
   async createFileVersion(data: { crn: string; version: string; s3Path: string }) {
-    const fileVersion = this.fileVersionRepository.create(data);
-    return this.fileVersionRepository.save(fileVersion);
+    try {
+      const fileVersion = this.fileVersionRepository.create(data);
+      return this.fileVersionRepository.save(fileVersion);
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to create file version: ${error.message}`);
+    }
   }
 
   async getFileVersionByVersion(version: string): Promise<FileVersion | undefined> {
-    return this.fileVersionRepository.findOne({ where: { version } });
+    try {
+      return this.fileVersionRepository.findOne({ where: { version } });
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to fetch file version: ${error.message}`);
+    }
   }
 
   async getFileVersionByCrnAndVersion(crn: string, version: string): Promise<FileVersion | null> {
-    return this.fileVersionRepository.findOne({ where: { crn, version } });
+    try {
+      return this.fileVersionRepository.findOne({ where: { crn, version } });
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to fetch file version by CRN and version: ${error.message}`);
+    }
   }
 
   async updateWordPath(id: number, wordPath: string): Promise<void> {
-    await this.fileVersionRepository.update(id, { s3WordPath: wordPath });
+    try {
+      await this.fileVersionRepository.update(id, { s3WordPath: wordPath });
+    } catch (error) {
+      throw new InternalServerErrorException(`Failed to update Word path: ${error.message}`);
+    }
   }
 }
